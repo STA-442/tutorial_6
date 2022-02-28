@@ -1,0 +1,836 @@
+---
+title: "Multilevel/Hierarchical Models"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+---
+
+```{r setup, include=FALSE}
+## Global options
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+## Setup
+
+For this tutorial, you will need to install the `lme4` package. This package contains all the functions we will need to begin fitting multilevel models in R. We also use the DiagrammeR package for making diagrams. 
+
+
+```{r, eval=F}
+
+# Install the lme4 package
+
+install.packages('lme4')
+install.packages("DiagrammeR")
+
+```
+
+## Introduction
+
+So far in class we have covered a class of models that put a rather strict assumption on the structure of the data. That is, that the observations are independent of one another. In this tutorial and the one that follows we will cover a set of regression models  where the data are structured in groups and coefficients can vary by
+group! In my own personal work, I have found many uses for these models as data that is hierarchicaclly structured arises naturally. 
+
+
+First some terminology. You will find these types of models referecenced under various terms, often used interchangeably. Here I list a few:
+
+- Multilevel Models
+- Hierarchical Models
+- Mixed Effects models
+- Random Effects models
+
+
+We will start simply by giving some examples of the types of data that we will model with hierarchical models. We will then look at some random intercept models followed by some random slope models. All data can be found in the `data/` folder of this github repository.
+
+### Example data
+
+Multilevel models are used when we want to model how relationships vary across units (levels). Data from multilevel models are often (but not always) would as coming from a nested structure. For example"
+
+- Students within classes within schools
+- Students within project groups within a class
+- Residents within apartment buildings within cities
+- Patients treated by doctors
+- Patients within treatment groups measured over time
+
+When presented with this type of data, it is useful to think about the stucture and map out the different levels.
+
+For example: We want to model student math scores from students in 25 different scools from 5 cities. We would map out these levels as:
+
+- Level 1: the student
+- Level 2: the classroom
+- Level 3: the school
+- Level 4: the city
+
+We do this because we may believe that any effects of interest may vary by one or more of these groups. The effect of eating lunch before a math test may vary between classrooms, or schools or cities (or all of them). 
+
+Another example: patients treated by 10 doctors have their weight measured 4 times over the course of a month. We could map out this structure as:
+
+- Level 1: individual weight measurements
+- Level 2: the patient
+- Level 3: the doctor
+
+Here we have measurements nested within a patient nested within a doctor. 
+
+Pause here to try to think of another example multilevel model example.
+
+
+
+## Motivating data example
+
+Here we motivate the models with the use of some sample data from the Cherry Blossom Running Race. This data comes from the github repo of [Modern Data Science with R](https://github.com/mdsr-book/mdsr)
+
+
+```{r, message=F, warning=F}
+library(dplyr)
+library(gt)
+
+cherry <- readr::read_csv('data/cherry-blossom-race.csv')
+
+cherry %>% 
+  head() %>% 
+  gt() %>% 
+  tab_header(title = "Cherry Blossom Running Race",
+             subtitle = "A sub-sample of outcomes for the annual Cherry Blossom Ten Mile race in Washington, D.C")
+```
+
+The data set contains the following variables:
+
+- `runner`: a unique identifier for the runner
+- `age`: age of the runner
+- `net`: time to complete the race, from starting line to finish line (minutes)
+- `gun`: time between the official start of the of race and the finish line (minutes)
+
+
+The outcome for this data will be the variable `net`: the time for each runner between the start line and finish line. Let's explore the data a little.
+
+```{r, message=F, warning=F}
+
+# How many runners
+n_distinct(cherry$runner)
+
+# How many races for each runner
+
+cherry %>% 
+  group_by(runner) %>% 
+  summarize(`number of races` = n(),
+         `age at first race` = min(age),
+         `age at last race` = max(age),
+         `mean race time` = round(mean(net, na.rm = T), 2),
+         `sd race time` = round(sd(net, na.rm = T), 1),
+         `missing values in outcome` = sum(is.na(net))) %>% 
+  gt() %>% 
+  tab_header(title = "Summary statistics for each runner")
+
+cherry %>% 
+  ggplot(aes(net)) +
+  geom_histogram() +
+  labs(x = "time to complete the race (minutes)")
+
+cherry %>% 
+  ggplot(aes(factor(runner), net)) +
+  geom_boxplot() +
+  labs(x = 'Runner ID',
+       y = "time to complete the race (minutes)") 
+
+
+
+
+```
+
+
+There are `r dplyr::n_distinct(cherry$runner)` runners in the data and they each completed 7 races. 
+
+We can see that there is a lot of variability within and between runners. For example, runner 17 has a lot of variability in each of their runs, while runner 12 has very little variability. Meanwhile runner 12 runs consistently faster race times than runner 17. 
+
+When we plot age against running time, we see a very weak association between age and running times. We can run a linear regression model to attempt to measure this effect.
+
+```{r, warning=F, message=F}
+
+
+
+cherry %>% 
+  ggplot(aes(age, net)) +
+  geom_point() +
+  labs(x = 'age in years',
+       y = "time to complete the race (minutes)") +
+  geom_smooth(method = "lm")
+
+
+lm_model <- lm(net ~ age, data = cherry) 
+
+sjPlot::tab_model(lm_model)
+
+
+
+
+
+
+```
+
+
+
+The age coefficient is small and is not statistically significant ( p = 0.544). Are we to conclude that age has no effect on running times?
+
+Let's consider the model we just fit. We will plot the fitted regression line for a few sample runners.
+
+`
+```{r, warning=F, message=F}
+cherry %>% 
+  filter(runner %in% 1:8) %>% 
+  ggplot(aes(age, net)) +
+  geom_point() +
+  facet_wrap(~ runner, nrow=2) +
+  geom_abline(intercept = coef(lm_model)[1],
+              slope = coef(lm_model)[2]) + 
+  labs(x = 'age in years',
+       y = "time to complete the race (minutes)") 
+
+```
+
+
+Above we selected runners 1 through 8, plotted their age against run times and added the fitted regression line from the linear regression model. 
+
+Does this line fit the data well for these 8 runners? For runner 3 perhaps, but I would argue it does not fit very well for the other 7 runners. For most of these runners we see a clear pattern for their running times increase as their age increases. They all have slightly different mean running times as well. 
+
+
+Below we plot a fitted linear regression line for each runner based on their 7 data points as well as the overall regression line. 
+```{r}
+
+cherry %>% 
+  ggplot(aes(age, net, color = factor(runner))) +
+  geom_point() +
+  labs(x = 'age in years',
+       y = "time to complete the race (minutes)",
+       color = "Runner ID") +
+  geom_smooth(method = "lm", se=F)+
+  geom_abline(intercept = coef(lm_model)[1],
+              slope = coef(lm_model)[2], size = 2, color = "blue")
+
+
+```
+
+
+#### Complete Pooling
+
+The simple regression model we fit is called the **complete pooling model**. In this model, we *pool*  all 252 running times ($y_1, y_2, \ldots y_{252}$) into one population pool. 
+
+We are making the following assumptions:
+
+- each observation is independent of the others
+- information about the individual runners is irrelevant to our model of running time vs age.
+
+The first assumption is clearly false as we are measuring the same runners several times. Though the observations on one runner might be independent of those on another, the observations within a runner are correlated. The second assumption takes a little more thought, but it is also incorrect. 
+
+
+We've seen above that by making these assumptions, this model has been unable to determine that people tend to get slower as they age. 
+
+
+**When we are presented with a nested data structure, the complete pooling model will violate the assumption of independence and we will often make misleading conclusions about any relationships we are investigating.**
+
+
+#### The No Pooling Model
+
+We've seen what happens when we completely pool all of our observations. What is the opposite approach? The **no pooling** model considers each of our  36 runners separately
+
+```{r}
+cherry %>% 
+  ggplot(aes(age, net)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, fullrange = TRUE) +
+  facet_wrap(~ runner) 
+```
+
+
+This model appears to fit the data quite well! The model(s) have picked up on the fact that the effect of age is different between runners and that the mean values vary between runners.
+
+There are problems with this model however.
+
+What if you choose to run in this race next year. How can we predict your race time given your age? You can't estimate this from the no pooling model!
+
+
+There is a second issue as well. Let's look at runner 1 a little more closely.
+
+```{r}
+cherry %>% 
+  filter(runner == 1) %>% 
+  ggplot(aes(age, net)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, fullrange = TRUE) 
+
+```
+
+Based on the rest of the data we have, should we assume that runner 1 will continue to see decreased running times?
+
+
+In the no pooled approach, we are only considering data from runner 1 when making this conclusion. We have data from 35 other runners, and we can make use of this data to know that runners typically slow down with age. Perhaps runner 1 will in fact have a faster race time over the next few years, but not as steep as the no pooled approach would suggest. 
+
+
+Let's summarize these thoughts. With the no pooled approach
+
+- We cannot generate predictions for new samples that fall outside the data we have modeled
+- The no pooled approach assumes that information from one runner contains no relevant information for any of the other runners (this is true in general outside the running example)
+
+
+### Multilevel model (partial pooling)
+
+
+Multilevel models provide a sort of in between of the complete pooling and no pooling approaches, known as **partial pooling**. 
+
+Multilevel models assume that although each group is unique, all groups are connected (having been sampled from some population) and might contain valuable information about one another. 
+
+
+The graph below shows a multilevel data structure in general. For your reference I have included the [DiagrammeR](http://rich-iannone.github.io/DiagrammeR/index.html) code I wrote to display this structure. DiagrammeR is an incredibly useful tool for drawing complex diagrams. 
+
+As a short tutorial:
+
+- you wrap all your code in quote with a call to `grViz`. 
+- create your graph with a digraph statement. I have named my graph `multilevel_model`
+- use a `graph` statement to give overall attributes (font, size, etc) to your entire graph
+- use a `node` statement to create nodes (give attributes inside brackets)
+  - after a node statement you can name as many nodes as you want (separated by a semicolon)
+  - When you give a node a name (e.g Group1), you can also give it a label inside square brackets. Here I am using html to give subscripts. For example, `[label=<Group<SUB>1</SUB>>]` will label my node $Group_1$. 
+- add edges between nodes with edge statements. For example `Group1->y_11` will draw a line between the node named `Group1` and the node names `y_11`
+
+See the docs for more information.
+
+
+```{r}
+library(DiagrammeR)
+
+grViz("
+digraph multilevel_model {
+
+  # a 'graph' statement
+  graph [overlap = true, fontsize = 10]
+
+  # several 'node' statements
+  node [shape = box,
+        fontname = Helvetica]
+  Population
+  
+   node [shape = box,
+        fontname = Helvetica]
+  Group1[label=<Group<SUB>1</SUB>>];
+  Group2[label=<Group<SUB>2</SUB>>]; 
+  group_dot[label=<...>]; 
+  Groupm[label=<Group<SUB>m</SUB>>]
+  
+
+  node [shape = circle,
+        fixedsize = true,
+        width = 0.9] // sets as circles
+  y_11[label=<y<SUB>11</SUB>>]; 
+  y_21[label=<y<SUB>21</SUB>>]; 
+  y_31[label=<y<SUB>31</SUB>>]; 
+  
+  y_12[label=<y<SUB>12</SUB>>]; 
+  y_22[label=<y<SUB>22</SUB>>]; 
+  y_32[label=<y<SUB>32</SUB>>];
+  y_dot[label=<...>]; 
+  
+  y_1m[label=<y<SUB>1m</SUB>>]; 
+  y_2m[label=<y<SUB>2m</SUB>>]; 
+  y_3m[label=<y<SUB>3m</SUB>>]
+
+  # several 'edge' statements
+  Population->Group1 Population->Group2 Population ->group_dot Population->Groupm
+  Group1->y_11 Group1->y_21 Group1->y_31 
+  Group2->y_12 Group2->y_22 Group2->y_32 
+  group_dot -> y_dot
+  Groupm->y_1m Groupm->y_2m Groupm->y_3m 
+}
+")
+
+```
+
+
+We will go into details shortly, but below I will fit a random intercept model to this data, and then plot the regression lines for the complete pool model, the no pool model and the partial pool model for 4 example runners and then a hypothetical new runner (you).
+
+
+
+```{r}
+
+# first the no pooling model
+no_pool_model <- cherry %>% 
+  group_by(runner) %>% 
+  do(fit_age = broom::tidy(lm(net ~ age, data = .))) %>% 
+  unnest(fit_age) %>% 
+  select(runner, term, estimate) %>% 
+  pivot_wider(names_from = term, values_from = estimate) %>% 
+  rename(intercept = `(Intercept)`, slope = age)
+
+# look at the first few observations of this object.
+
+no_pool_model %>% 
+  head %>% 
+  gt() %>% 
+  tab_header(title = "No pooling model",
+             subtitle = "First few runner coefficients")
+
+#####################################
+# PARTIAL POOLING RANDOM INTERCEPT MODEL
+
+library(lme4)
+
+random_int_model <- lmer(net ~ age + (1 | runner), data = cherry)
+
+random_intercepts <- ranef(random_int_model)
+fixed_effects <- fixef(random_int_model)
+partial_pooling <- tibble(
+  runner = 1:36,
+  partial_pool_intercept = fixed_effects[1] + random_intercepts$runner$`(Intercept)`,
+  partial_pool_slope = fixed_effects[2]
+)
+
+# plot for runners 4 runners
+
+cherry %>% 
+  filter(runner %in% c(1, 20, 22, 25)) %>% 
+  left_join(no_pool_model, by = "runner") %>% 
+   left_join(partial_pooling, by = "runner") %>% 
+  ggplot(aes(age, net)) +
+  geom_point() +
+  geom_abline(intercept = coef(lm_model)[1],
+              slope = coef(lm_model)[2], color = "blue") +
+  geom_abline(aes(intercept = intercept, slope = slope,
+                  color = "No Pool")) +
+  geom_abline(aes(intercept = partial_pool_intercept, slope = partial_pool_slope,
+                  color = "Partial Pool")) +
+  facet_wrap(~ runner) +
+  coord_cartesian(ylim = c(70, 120))
+
+
+# We can estimate a new runner's time as well
+
+new_runner <- tibble(runner = 37, age = 50:70)
+predictions <- predict(random_int_model, new_runner, allow.new.levels = T)
+new_runner %>% 
+  mutate(predictions = predictions) %>% 
+  ggplot(aes(age, predictions)) +
+  geom_point() + 
+  geom_line() +
+  geom_abline(intercept = coef(lm_model)[1],
+              slope = coef(lm_model)[2], color = "blue")+
+  coord_cartesian(ylim = c(70, 120)) +
+  ggtitle("Estimated running time for a new runner")
+  
+```
+
+Notice the use of `allow.new.levels = T` in the prediction. The blue line is the complete pooling estiate while the black line is the estimate from our multilevel model. 
+
+Our partial pooling model doesn't ignore the population from which our runners were sampled. We can use our complete pooling or partial pooling (hierarchical model) to generate predictions for a new runner. The results are quite different between the two models. The complete pooling model hasnt picked up on the fact that runners get slower as they age, while the multilevel model has. The rate at which you decline is equivalent to the average decline across the 36 runners from the sample. 
+ 
+ 
+ 
+## Random intercept 
+
+
+We often think of multilevel linear models as an extension of the linear model:
+
+$$y_i = \alpha + \beta x_i + \epsilon_i$$
+where we allow for varying intercepts
+
+$$y_i = \alpha_{j[i]} + \beta x_i + \epsilon_i$$
+and further extend to allow for varying slopes by group
+$$y_i = \alpha_{j[i]} + \beta_{j[i]} x_i + \epsilon_i$$
+
+
+### Notation
+
+
+- The smallest item of measurement is called a unit and is index as $i = 1\ldots n$.
+- The outcome measurement $y = (y_1, \ldots y_n)$ is at the unit level. 
+- Predictors are represented by an $n\times k$ matrix $X$ so that the vector of predicted values $\hat{y} = X\beta$. 
+- For each unit $i$, we denote the row vector $X_i$ so that $\hat{y_i} = X\beta$ is the prediction for unit $i$
+- We labels groups as $j = 1,\ldots J$. This works for single level grouping (e.g. students in schools, people over time, patients within doctors, etc)
+- If we need a second level of grouping we will use $k = 1,\ldots, K$.
+- Index variables $j[i]$ code group membership. If $j[14]=3$ then the 12the unit in the data $i=12$ belongs to group 3.
+
+We specify the varying-intercept model as
+
+$$y_i \sim N(\alpha_{j[i]} + \beta x_i, \sigma_y^2)$$
+
+or as 
+
+$$y_i = \alpha_{j[i]} + \beta x_i + \epsilon_i$$
+
+
+With multiple predictors we write the model as:
+
+$$y_i \sim N(X_iB, \sigma_y^2)$$
+
+Where $B$ is a matrix of coefficients.
+
+- Standard deviation is $\sigma_y$ for data level errors, and $\sigma_{\alpha$ $\sigma_{\beta}$ for group level errors. 
+- Group level predictors are represented by a matrix $U$ with $J$ rows.
+  For example, in the group level model $\alpha_j \sim N(U_j\gamma, \sigma_{\alpha}^2)$. If we have a single group level predictor, we label it as lowercase $u$.
+  
+  
+
+### Complete pooling with no predictors
+
+
+Remember that multilevel regression can be thought of as a method for
+compromising between the two extremes of excluding a categorical predictor from
+a model (*complete pooling*), or estimating separate models within each level of the
+categorical predictor (*no pooling*).
+
+
+We will use the `radon.csv` dataset which contains Radon measurements of 919 owner-occupied homes in 85 counties in Minnesota.
+
+The data has the following variables
+
+- `log.radon`: Radon measurement (in log pCi/L, i.e., log picoCurie per liter)
+- `basement`:  Indicator for the level of the home at which the radon measurement was taken - 0 = basement, 1 = first floor.
+- `uranium`: Average county-level soil uranium content.
+- `county`: county ID
+- `count.name`: county name as a factor
+
+```{r, message=F,warning=F}
+radon <- readr::read_csv('data/radon.csv')
+
+```
+
+
+Let's plot the complete pooling, no pooling and multilevel model partial pooling for this data. Here we are interested in the log radon measurements per county
+
+
+```{r}
+# for extracting the standard errors
+source('helpers.R')
+
+# the complete pooling estimates
+mean_log_radon <- mean(radon$log.radon)
+
+# no pooling estimates
+count_means <- radon %>% 
+  group_by(county) %>% 
+  summarize(mean_radon = mean(log.radon),
+            county_var = var(log.radon),
+            sample_size = n()) %>% 
+  ungroup() %>% 
+  mutate(county_sds =  mean(sqrt(county_var[!is.na(county_var)]))/sqrt(sample_size))
+            
+# plot of mean no pooling and complete pooling estimates
+p1 <- count_means %>% 
+  ggplot(aes(sample_size , mean_radon)) +
+  geom_point() + 
+  geom_errorbar(aes(ymin = mean_radon - county_sds, 
+                    ymax = mean_radon + county_sds)) +
+  geom_hline(yintercept =mean_log_radon, color = 'blue', size = 1) +
+  ggtitle("No pooling and complete pooling estimates") +
+  coord_cartesian(ylim = c(0, 3.5))
+
+# make a multilevel model to get the partial pooling estiates
+random_int_model <- lmer(log.radon ~ 1 + (1| county), data = radon)
+
+# extract the standard errors
+se <- random_int_model %>% 
+  ranefSE()%>%
+  rename(intercept=`(Intercept)`,se=`se.(Intercept)`)
+
+# make the partial pooling plot
+p2 <- count_means %>% 
+  mutate(model_intercept = coef(random_int_model)$county$`(Intercept)`) %>% 
+  bind_cols(se) %>% 
+  ggplot(aes(sample_size , model_intercept)) +
+  geom_point() + 
+  geom_errorbar(aes(ymin = model_intercept - se, 
+                    ymax = model_intercept + se)) +
+  geom_hline(yintercept =mean_log_radon, color = 'blue', size = 1) +
+  ggtitle("Partial pooling estimates")+
+  coord_cartesian(ylim = c(0, 3.5))
+
+
+cowplot::plot_grid(p1, p2)
+```
+
+Complete pooling ignores variation between counties while the no-pooling
+analysis overstates it. Notice how counties with fewer observations shrink towards the population mean while data with more observations tend to shrink less. This intuitively makes sense. The more data we have, the more certain we are of the estimates. 
+
+
+The goal of estimation is the average log radon level $\alpha_j$ for each county $j$. For each county we have a sample size $n_j$ . 
+
+In this simple case we can get the multilevel estimate for a given county $j$   as a weighted average of the mean of the observations in the county:
+
+
+
+$$\alpha_{j}^{\text{multilevel}} \approx \frac{\frac{n_j}{\sigma_y^2}\bar{y}_j + \frac{1}{\sigma_{\alpha}^2}\bar{y}_{all} }{\frac{n_j}{\sigma_y^2} + \frac{1}{\sigma_{\alpha}^2} }$$
+
+### Adding predictors
+
+We will add the predictor basement (0 = basement, 1 = first floor). We can generate estimates for our complete pooling, no pooling, and partial pooling as follows. 
+
+
+
+```{r}
+
+complete_pool <- lm(log.radon ~ basement, data = radon)
+
+summary(complete_pool)
+
+coef(complete_pool)[2]
+no_pool <- lm(log.radon ~ basement + factor(county) - 1, data = radon)
+coef(no_pool)[1]
+partial_pool <- lmer(log.radon ~ basement + (1 | county), data = radon)
+fixef(partial_pool)[2]
+
+
+
+```
+
+I leave it as an exercise to make a similar plot as for our first model (for a few sampled counties), but including our basement predictor. 
+
+In general, we see the same problems here as we did in the first example using the runner data. 
+
+
+### Specifying a multilevel model
+
+With this radon data, the simplest multilevel model is specified as:
+
+$$y_i \sim N(\alpha_{j[i]} + \beta x_i, \sigma_y^2), \text{ for } i = 1, \ldots, n$$
+
+This looks similar to the no-pooling model, but the difference is that the $\alpha_j$ are set to the least squares estimate in the no pooling model.
+
+In the multilevel model we put a soft constraint on the $\alpha_j$'s. They are assigned a probability distribution
+
+$$ \alpha_j \sim N(\mu_{\alpha}, \sigma_{\alpha}^2), \text{ for } j = 1, \ldots, J$$
+
+The mean $\mu_{\alpha}$ and standard deviation $\sigma_{\alpha}$ get estimated using the data. This constraint has the effect of pulling the estimates $\alpha_j$ towards the population mean $\mu_{\alpha}$.
+
+
+Let's look at these estimates from our fitted model. We can use `VarCorr()` to extract the standard deviations from our y values and the intercept. We can extract fixed effect with `fixef()`
+
+
+```{r}
+# 
+multievel_model <- lmer(log.radon ~ basement + (1 | county), data = radon)
+
+sigmas <- VarCorr(multievel_model)
+
+print(sigmas)
+
+fixed_effects <- fixef(multievel_model)
+
+print(fixed_effects)
+```
+
+So with this model we have, 
+
+- $\sigma_{\alpha}$ = 0.328
+- $\mu_{\alpha}$ = 1.46
+- $\sigma_{\y}$ = 0.756
+- $\beta$ = -0.693
+
+## More on the lmer function
+
+
+We will be using `lmer` to fit linear multilevel models and `glmer` to fit generalized linear multilevel models.
+
+This function works similar to the lm and glm functions we have used in the past. The exception is that when specifying random effects (both intercepts and slopes). Below we fit a model with a random intercept and extract components from the model.
+
+
+```{r}
+
+# random intercept model
+
+random_intercept <- lmer(log.radon ~ basement + (1 | county), data = radon)
+
+# model summary
+summary(random_intercept)
+
+# estimated coefficients
+
+model_coef <- coef(random_intercept)
+model_coef$county %>% head()
+# fixed effects
+
+fixef(random_intercept)
+
+# random effects 
+random_effects <- ranef(random_intercept)
+random_effects$county %>% head()
+
+# standard errors fixed effects
+se.fixef(random_intercept)
+
+# standard errors random effects
+random_effects <- se.ranef(random_intercept)
+random_effects$county %>% head()
+
+```
+
+
+
+Good news is that other packages we have used like SjPlot play nicely with lmer objects
+
+
+```{r}
+sjPlot::tab_model(random_intercept)
+
+```
+
+
+## Random slope model
+
+The next step in multilevel modeling is to allow more than one regression coefficient to vary by group.
+
+We can extend the model we have been working with so far as follows:
+
+
+$$y_i \sim N(\alpha_{j[i]} + \beta_{j[i]} x_i, \sigma_y^2)$$
+
+$$
+ \begin{pmatrix}
+ \alpha_j  \\
+\beta_j
+\end{pmatrix} = N\Big(  \begin{pmatrix}
+ \mu_\alpha  \\
+\mu_\beta
+\end{pmatrix}, \begin{pmatrix}
+ \sigma_{\alpha}^2 & \rho\sigma_{\alpha}\sigma_{\beta} \\
+\sigma_{\alpha}^2 & \sigma_{\beta}^2
+\end{pmatrix}\Big), \text{ for } j = 1, \ldots, J
+$$
+
+
+
+```{r}
+
+random_slope <- lmer(log.radon ~ basement + (1 + basement |county), data = radon)
+
+summary(random_slope)
+
+
+model_coef <- coef(random_slope)
+model_coef$county %>% head()
+# fixed effects
+
+fixef(random_slope)
+
+# random effects 
+random_effects <- ranef(random_slope)
+random_effects$county %>% head()
+
+# standard errors fixed effects
+se.fixef(random_slope)
+
+# standard errors random effects
+random_effects <- se.ranef(random_slope)
+random_effects$county %>% head()
+
+
+```
+
+
+
+We often want to plot these random intercepts for each level of our grouping variable. The sjPlot package comes with a handy function for this
+
+
+```{r}
+# random effects plot
+sjPlot::plot_model(random_slope, type = "re")
+
+```
+
+
+### Adding group level predictors
+
+One of the powerful extensions of multilevel models is the ability to add predictors to the $\mu_\alpha$ term(s). Here we briefly describe this model and show how to fit it. We will get into more details in the next lecture.
+
+
+
+This model is specified as
+
+$$
+ \begin{pmatrix}
+ \alpha_j  \\
+\beta_j
+\end{pmatrix} = N\Big(  \begin{pmatrix}
+ \gamma_0^\alpha + \gamma_1^\alpha\mu_j  \\
+\gamma_0^\beta + \gamma_1^\beta\mu_j 
+\end{pmatrix}, \begin{pmatrix}
+ \sigma_{\alpha}^2 & \rho\sigma_{\alpha}\sigma_{\beta} \\
+\sigma_{\alpha}^2 & \sigma_{\beta}^2
+\end{pmatrix}\Big), \text{ for } j = 1, \ldots, J
+$$
+
+Here we will add in the county level soil uranium measurements:
+
+
+```{r, warning=F, message=F}
+
+random_slope_full <- lmer(log.radon ~ basement + uranium +  (1  |county),
+                         data = radon)
+
+summary(random_slope_full)
+
+
+model_coef <- coef(random_slope_full)
+model_coef$county %>% head()
+# fixed effects
+
+fixef(random_slope_full)
+
+# random effects 
+random_effects <- ranef(random_slope_full)
+random_effects$county %>% head()
+
+# standard errors fixed effects
+se.fixef(random_slope_full)
+
+# standard errors random effects
+random_effects <- se.ranef(random_slope_full)
+random_effects$county %>% head()
+
+```
+
+In this model, $\gamma_0^\alpha$, $\gamma_0^\beta$, $\gamma_1^\alpha$, are given by:
+
+- `intercept`
+- `basement`
+- `uranium`
+
+
+Below we plot the alpha estimates plus or minus se against the uranium measurements.This shows how uranium is predictive of the intercept for each county!
+
+
+```{r}
+# Get the county level uranium measurements
+uranium <- radon %>% 
+  group_by(county) %>% 
+  slice(1) %>% 
+  ungroup() %>% 
+  select(county, uranium)
+
+# get the fixed effect
+fixed_effects <- fixef(random_slope_full)
+
+
+# get the estimated alpha 
+alpha_hat<- fixef(random_slope_full)[1] +
+  fixef(random_slope_full)[3]*uranium$uranium + 
+  as.vector(ranef(random_slope_full)$county) %>% 
+  pull(`(Intercept)`)
+
+# get the standard errors of the alpha
+alpha_se <- se.ranef(random_slope_full)$county %>% 
+  as.data.frame() %>% 
+  pull( `(Intercept)`)
+
+# make a data frame with these values
+random_effects <- tibble(county = 1:85, 
+                         uranium = uranium$uranium,
+                         alpha_hat = alpha_hat,
+                         alpha_se = alpha_se)
+
+#plot the estimated alpha against the uranium measurements
+
+random_effects %>% 
+  ggplot(aes(uranium, alpha_hat)) +
+  geom_point() +
+  geom_errorbar(aes(ymin= alpha_hat -alpha_se,
+                    ymax = alpha_hat + alpha_se)) +
+  geom_abline(intercept = fixed_effects[1], slope = fixed_effects[3])
+```
+
+
